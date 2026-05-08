@@ -1,0 +1,6 @@
+{
+  "name": "Nongkrong.zip",
+  "description": "Temukan hidden gem cafe, listening bar, atau tempat gigs di Jakarta berdasarkan mood kalian. Dilengkapi AI Chatbot realtime dan map dari Google.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["chatbot", "map"]
+}
