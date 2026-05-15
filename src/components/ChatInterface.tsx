@@ -4,7 +4,37 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2, Send, MapPin, Github, Heart, MessageSquare, Trash2, Bookmark, Save } from "lucide-react";
 import { usePlaceContext } from "../PlaceContext";
-import { useMapsLibrary } from "@vis.gl/react-google-maps";
+import placesDataRaw from "../places.json";
+
+const placesData = placesDataRaw as any[];
+
+function searchLocalPlaces(query: string) {
+  const q = query.toLowerCase();
+  return placesData.map(p => {
+    let score = 0;
+    const name = (p.name || "").toLowerCase();
+    const cat = (p.category || "").toLowerCase();
+    const addr = (p.address_full || "").toLowerCase();
+    
+    if (name.includes(q)) score += 10;
+    if (cat.includes(q)) score += 5;
+    if (addr.includes(q)) score += 2;
+    
+    const words = q.split(/\s+/);
+    for (const w of words) {
+        if (w.length > 3) {
+            if (name.includes(w)) score += 3;
+            if (cat.includes(w)) score += 2;
+            if (addr.includes(w)) score += 1;
+        }
+    }
+    
+    return { ...p, score };
+  })
+  .filter(p => p.score > 0)
+  .sort((a, b) => b.score - a.score)
+  .slice(0, 15);
+}
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -56,7 +86,6 @@ export default function ChatInterface() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"places" | "chats">("places");
-  const placesLib = useMapsLibrary("places");
   const { setSelectedPlaces, setActivePlace, favorites, savedChats, saveChat, deleteChat } = usePlaceContext();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -67,7 +96,7 @@ export default function ChatInterface() {
 
   const handleSend = async (manualInput?: string) => {
     const textToProcess = manualInput || input;
-    if (!textToProcess.trim() || !placesLib) return;
+    if (!textToProcess.trim()) return;
     
     const userText = textToProcess;
     if (!manualInput) setInput("");
@@ -84,16 +113,21 @@ export default function ChatInterface() {
       actualConvo.forEach((m) => {
         history.push({ role: m.role, parts: [{ text: m.text }] });
       });
-      history.push({ role: "user", parts: [{ text: userText }] });
+      
+      const localResults = searchLocalPlaces(userText);
+      let contextText = userText;
+      if (localResults.length > 0) {
+        contextText += `\n\n[CONTEXT: Data Tempat Lokal dari Database kita]\n` + localResults.map(p => `- ${p.name} (${p.category}): ${p.address_full}, Rating: ${p.rating}`).join('\n');
+      }
+      history.push({ role: "user", parts: [{ text: contextText }] });
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model: "gemini-2.0-flash",
         contents: history,
         config: {
-          systemInstruction: "Kamu adalah 'Nongkrong.zip', bot asisten skena Jakarta yang estetik dan brutalist. Bahasa gaul Gen Z (pakai lo/gue, chill). Tugas utamamu bantu cari tempat nongkrong (hidden gem beneran yang jarang orang tau, listening bar, cafe estetis, art space). Gunakan tools googleSearch untuk cari info tren realtime, preferensi tempat yang viral di TikTok atau Twitter, dan ceritakan di summary kenapa tempat itu hype. Berikan minimal 5 dan maksimal 7 rekomendasi terbaik secara bersamaan, panggil function displayPlaces HANYA SEKALI dengan daftar tempat tersebut.",
+          systemInstruction: "Kamu adalah 'Nongkrong.zip', bot asisten skena Jakarta yang estetik dan brutalist. Bahasa gaul Gen Z (pakai lo/gue, chill). Tugas utamamu bantu cari tempat nongkrong. WAJIB cari dan pilih tempat dari CONTEXT Data Tempat Lokal yang diberikan jika ada. Berikan minimal 5 dan maksimal 7 rekomendasi terbaik secara bersamaan, ceritakan di summary kenapa tempat itu menarik, dan panggil function displayPlaces HANYA SEKALI dengan daftar tempat tersebut.",
           temperature: 0.7,
           tools: [
-            { googleSearch: {} },
             { functionDeclarations: [displayPlaces] }
           ],
           toolConfig: { includeServerSideToolInvocations: true },
@@ -116,28 +150,42 @@ export default function ChatInterface() {
             const mapPlaces = [];
             for (const rp of rawPlaces) {
                try {
-                 const res = await placesLib.Place.searchByText({
-                   textQuery: rp.querySearch + " Jakarta",
-                   fields: ["displayName", "location", "formattedAddress", "photos", "id", "reviews", "rating", "regularOpeningHours"],
-                   maxResultCount: 1,
-                 });
-                 if (res.places && res.places.length > 0) {
-                   const place = res.places[0];
+                 const query = (rp.querySearch || rp.name).toLowerCase();
+                 // Temukan dari local json
+                 const place = placesData.find((p: any) => 
+                    (p.name && p.name.toLowerCase() === query) || 
+                    (p.name && p.name.toLowerCase().includes(query)) || 
+                    query.includes(p.name?.toLowerCase())
+                 );
+
+                 if (place) {
                    mapPlaces.push({
                      ...rp,
-                     id: place.id,
-                     location: { lat: place.location?.lat(), lng: place.location?.lng() },
-                     address: place.formattedAddress,
-                     displayName: place.displayName,
-                     photoUri: place.photos?.[0]?.getURI({ maxWidth: 600 }),
-                     photoUris: place.photos?.slice(0, 5).map(p => p.getURI({ maxWidth: 600 })) || [],
-                     rating: place.rating,
-                     reviews: place.reviews,
-                     openingHours: place.regularOpeningHours?.weekdayDescriptions,
+                     id: place.url || place.name,
+                     location: { lat: parseFloat(place.latitude), lng: parseFloat(place.longitude) },
+                     address: place.address_full,
+                     displayName: place.name,
+                     photoUri: undefined, 
+                     photoUris: [],
+                     rating: parseFloat(place.rating) || 0,
+                     reviews: [],
+                     openingHours: place.hours ? [place.hours] : undefined,
+                   });
+                 } else {
+                   // Fallback jika tidak ketemu persis
+                   mapPlaces.push({
+                     ...rp,
+                     id: "temp-" + Date.now() + Math.random(),
+                     location: { lat: -6.200000, lng: 106.816666 }, // default JKT
+                     address: "Jakarta",
+                     displayName: rp.name,
+                     rating: 0,
+                     reviews: [],
+                     photoUris: [],
                    });
                  }
                } catch (e) {
-                 console.error("Error searching place", rp, e);
+                 console.error("Error mapping local place", rp, e);
                }
             }
             setSelectedPlaces(mapPlaces);
@@ -150,11 +198,10 @@ export default function ChatInterface() {
           setMessages((prev) => [...prev, { role: "model", text: responseText }]);
       } else if (functionCalls && functionCalls.length > 0) {
          const response2 = await ai.models.generateContent({
-            model: "gemini-3.1-pro-preview",
+            model: "gemini-2.0-flash",
             contents: [...history, {role: "model", parts: response.candidates?.[0]?.content?.parts || []}],
             config: {
               systemInstruction: "Beritahu user bahwa rekomendasi sudah ditampilkan di peta dengan bahasa singkat dan asik.",
-              tools: [ { googleSearch: {} } ],
             }
          });
          setMessages((prev) => [...prev, { role: "model", text: response2.text || "Udah gue tampilin di map cuy! Cekidot ya." }]);
